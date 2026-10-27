@@ -1,0 +1,201 @@
+package model
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/bjarneo/cliamp/playlist"
+	"github.com/bjarneo/cliamp/provider"
+)
+
+type ratingTestProvider struct {
+	name        string
+	accept      bool
+	calls       int
+	ratings     []int
+	hadDeadline bool
+	err         error
+}
+
+func (p *ratingTestProvider) Name() string                                { return p.name }
+func (p *ratingTestProvider) Playlists() ([]playlist.PlaylistInfo, error) { return nil, nil }
+func (p *ratingTestProvider) Tracks(string) ([]playlist.Track, error)     { return nil, nil }
+func (p *ratingTestProvider) CanRateTrack(track playlist.Track) bool {
+	return p.accept && track.ProviderMeta[provider.MetaNavidromeID] != ""
+}
+func (p *ratingTestProvider) SetTrackRating(ctx context.Context, _ playlist.Track, rating int) error {
+	p.calls++
+	p.ratings = append(p.ratings, rating)
+	_, p.hadDeadline = ctx.Deadline()
+	return p.err
+}
+
+func ratingTestModel(p *ratingTestProvider, tracks ...playlist.Track) Model {
+	pl := playlist.New()
+	pl.Add(tracks...)
+	return Model{
+		playlist:  pl,
+		provider:  p,
+		providers: []provider.Entry{{Key: "navidrome", Name: p.name, Provider: p}},
+		focus:     focusPlaylist,
+	}
+}
+
+func ratingTrack(id string, rating int) playlist.Track {
+	return playlist.Track{
+		Path:         "https://music.example/rest/stream?id=" + id,
+		Title:        "Track " + id,
+		UserRating:   rating,
+		ProviderMeta: map[string]string{provider.MetaNavidromeID: id},
+	}
+}
+
+func TestRatingChordReturnsAsyncCommandWithoutBlockingSeekDigits(t *testing.T) {
+	p := &ratingTestProvider{name: "Navidrome", accept: true}
+	m := ratingTestModel(p, ratingTrack("one", 1))
+
+	if cmd := m.handleMainKey(tea.KeyPressMsg{Text: "*"}); cmd != nil {
+		t.Fatal("rating prefix returned a command")
+	}
+	cmd := m.handleMainKey(tea.KeyPressMsg{Text: "3"})
+	if cmd == nil {
+		t.Fatal("*3 returned no provider command")
+	}
+	if p.calls != 0 {
+		t.Fatalf("provider calls before command = %d, want 0", p.calls)
+	}
+	msg, ok := cmd().(trackRatingSyncedMsg)
+	if !ok {
+		t.Fatalf("command message = %T, want trackRatingSyncedMsg", cmd())
+	}
+	if p.calls != 1 || len(p.ratings) != 1 || p.ratings[0] != 3 {
+		t.Fatalf("provider calls = %d, ratings = %v", p.calls, p.ratings)
+	}
+	if !p.hadDeadline {
+		t.Fatal("provider context has no deadline")
+	}
+	if msg.rating != 3 {
+		t.Fatalf("message rating = %d, want 3", msg.rating)
+	}
+
+	plain := ratingTestModel(p, ratingTrack("two", 0))
+	if cmd := plain.handleMainKey(tea.KeyPressMsg{Text: "3"}); cmd != nil {
+		t.Fatal("plain seek digit returned a command")
+	}
+	if !plain.pendingSeekActive || plain.pendingSeekPct != 3 {
+		t.Fatalf("plain digit seek state = active %v pct %d", plain.pendingSeekActive, plain.pendingSeekPct)
+	}
+}
+
+func TestRatingProviderFailureDoesNotMutateLocalState(t *testing.T) {
+	p := &ratingTestProvider{name: "Navidrome", accept: true, err: errors.New("server rejected it")}
+	track := ratingTrack("one", 2)
+	m := ratingTestModel(p, track)
+	m.setPlaybackTrack(track)
+
+	m.handleTrackRatingSynced(m.rateSelectedTrack(4)().(trackRatingSyncedMsg))
+	got, _ := m.playlist.Track(0)
+	if got.UserRating != 2 || m.playingTrack.UserRating != 2 {
+		t.Fatalf("ratings after failure = row %d playing %d, want 2/2", got.UserRating, m.playingTrack.UserRating)
+	}
+	if !strings.Contains(m.status.text, "Navidrome did not save rating: server rejected it") {
+		t.Fatalf("status = %q", m.status.text)
+	}
+}
+
+func TestRatingSuccessUpdatesRowAndMatchingActivePlayback(t *testing.T) {
+	p := &ratingTestProvider{name: "Navidrome", accept: true}
+	track := ratingTrack("one", 1)
+	m := ratingTestModel(p, track)
+	m.setPlaybackTrack(track)
+
+	m.handleTrackRatingSynced(m.rateSelectedTrack(5)().(trackRatingSyncedMsg))
+	got, _ := m.playlist.Track(0)
+	if got.UserRating != 5 || m.playingTrack.UserRating != 5 {
+		t.Fatalf("ratings after success = row %d playing %d, want 5/5", got.UserRating, m.playingTrack.UserRating)
+	}
+
+	detached := ratingTestModel(p, track)
+	detached.setPlaybackTrack(track)
+	detached.playbackDetached = true
+	detached.handleTrackRatingSynced(detached.rateSelectedTrack(4)().(trackRatingSyncedMsg))
+	if detached.playingTrack.UserRating != 1 {
+		t.Fatalf("detached playing rating = %d, want unchanged 1", detached.playingTrack.UserRating)
+	}
+}
+
+func TestRatingStaleRowAndOlderRequestResultsAreIgnored(t *testing.T) {
+	p := &ratingTestProvider{name: "Navidrome", accept: true}
+	first := ratingTrack("one", 1)
+	second := ratingTrack("two", 2)
+	m := ratingTestModel(p, first, second)
+
+	staleRow := m.rateSelectedTrack(5)().(trackRatingSyncedMsg)
+	m.plCursor = 1
+	m.handleTrackRatingSynced(staleRow)
+	got, _ := m.playlist.Track(0)
+	if got.UserRating != 1 {
+		t.Fatalf("stale row result changed rating to %d", got.UserRating)
+	}
+
+	m.plCursor = 0
+	older := m.rateSelectedTrack(3)().(trackRatingSyncedMsg)
+	newer := m.rateSelectedTrack(4)().(trackRatingSyncedMsg)
+	m.handleTrackRatingSynced(older)
+	got, _ = m.playlist.Track(0)
+	if got.UserRating != 1 {
+		t.Fatalf("older request changed rating to %d", got.UserRating)
+	}
+	m.handleTrackRatingSynced(newer)
+	got, _ = m.playlist.Track(0)
+	if got.UserRating != 4 {
+		t.Fatalf("newer request rating = %d, want 4", got.UserRating)
+	}
+}
+
+func TestStaleRatingFailureIsIgnored(t *testing.T) {
+	p := &ratingTestProvider{name: "Navidrome", accept: true, err: errors.New("late failure")}
+	m := ratingTestModel(p, ratingTrack("one", 1), ratingTrack("two", 2))
+	msg := m.rateSelectedTrack(5)().(trackRatingSyncedMsg)
+	m.plCursor = 1
+
+	m.handleTrackRatingSynced(msg)
+
+	if m.status.text != "" {
+		t.Fatalf("stale failure status = %q, want empty", m.status.text)
+	}
+}
+
+func TestRatingUnsupportedTrackDoesNotReturnCommandOrMutate(t *testing.T) {
+	p := &ratingTestProvider{name: "Navidrome", accept: false}
+	m := ratingTestModel(p, ratingTrack("one", 2))
+	if cmd := m.rateSelectedTrack(4); cmd != nil {
+		t.Fatal("unsupported track returned a command")
+	}
+	got, _ := m.playlist.Track(0)
+	if got.UserRating != 2 || p.calls != 0 {
+		t.Fatalf("unsupported state = rating %d calls %d", got.UserRating, p.calls)
+	}
+	if !strings.Contains(m.status.text, "Rating is not available") {
+		t.Fatalf("status = %q", m.status.text)
+	}
+}
+
+func TestRatingChordIsRegisteredWithoutSingleKeyRun(t *testing.T) {
+	for _, spec := range commandRegistry {
+		if spec.KeyLabel == "* then 0-5" {
+			if spec.runKey() != "" {
+				t.Fatalf("rating chord run key = %q, want empty", spec.runKey())
+			}
+			if !spec.Keymap || spec.Mode&commandModeMain == 0 {
+				t.Fatalf("rating chord registry = %+v", spec)
+			}
+			return
+		}
+	}
+	t.Fatal("rating chord is absent from command registry")
+}

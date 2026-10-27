@@ -740,6 +740,7 @@ type subsonicSong struct {
 	TrackNumber int    `json:"track"`
 	Genre       string `json:"genre"`
 	Duration    int    `json:"duration"`
+	UserRating  int    `json:"userRating"`
 }
 
 func (c *Client) songToTrack(s subsonicSong) playlist.Track {
@@ -753,6 +754,7 @@ func (c *Client) songToTrack(s subsonicSong) playlist.Track {
 		Genre:        s.Genre,
 		Stream:       true,
 		DurationSecs: s.Duration,
+		UserRating:   s.UserRating,
 		ProviderMeta: map[string]string{c.d.metaKey(): s.ID},
 	}
 }
