@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
@@ -91,6 +93,8 @@ func TestSetTrackRatingInvalidatesCachedPlaylistsContainingSong(t *testing.T) {
 func TestSetTrackRatingPreventsInflightFetchFromRestoringStaleCache(t *testing.T) {
 	fetchStarted := make(chan struct{})
 	releaseFetch := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFetch) }) }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/rest/getPlaylist":
@@ -104,6 +108,7 @@ func TestSetTrackRatingPreventsInflightFetchFromRestoringStaleCache(t *testing.T
 		}
 	}))
 	defer srv.Close()
+	defer release()
 
 	c := NewNavidromeClient(Config{BaseURL: srv.URL, User: "u", Password: "p"})
 	fetched := make(chan error, 1)
@@ -111,12 +116,16 @@ func TestSetTrackRatingPreventsInflightFetchFromRestoringStaleCache(t *testing.T
 		_, err := c.Tracks("playlist-1")
 		fetched <- err
 	}()
-	<-fetchStarted
+	select {
+	case <-fetchStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("getPlaylist was not requested")
+	}
 	track := playlist.Track{ProviderMeta: map[string]string{provider.MetaNavidromeID: "song-1"}}
 	if err := c.SetTrackRating(context.Background(), track, 4); err != nil {
 		t.Fatalf("SetTrackRating: %v", err)
 	}
-	close(releaseFetch)
+	release()
 	if err := <-fetched; err != nil {
 		t.Fatalf("Tracks: %v", err)
 	}
