@@ -41,6 +41,7 @@ func (c *Client) SetTrackRating(ctx context.Context, track playlist.Track, ratin
 func (c *Client) invalidateTrackCaches(songID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.trackCacheGen++
 	for playlistID, tracks := range c.trackCache {
 		for _, track := range tracks {
 			if track.Meta(c.d.metaKey()) == songID {

@@ -161,6 +161,25 @@ func TestRatingWritesSerializeAndSkipSupersededQueuedValue(t *testing.T) {
 	}
 }
 
+func TestRatingWritesUseProviderSongIdentityAcrossStreamURLs(t *testing.T) {
+	p := &ratingTestProvider{name: "Navidrome", accept: true}
+	firstTrack := ratingTrack("one", 1)
+	firstTrack.Path += "&salt=first"
+	m := ratingTestModel(p, firstTrack)
+	first := m.rateSelectedTrack(3)
+
+	secondTrack := firstTrack
+	secondTrack.Path = strings.Replace(firstTrack.Path, "salt=first", "salt=second", 1)
+	m.playlist.SetTrack(0, secondTrack)
+	second := m.rateSelectedTrack(4)
+
+	second()
+	first()
+	if len(p.ratings) != 1 || p.ratings[0] != 4 {
+		t.Fatalf("provider ratings = %v, want only latest [4]", p.ratings)
+	}
+}
+
 func TestRatingProviderFailureDoesNotMutateLocalState(t *testing.T) {
 	p := &ratingTestProvider{name: "Navidrome", accept: true, err: errors.New("server rejected it")}
 	track := ratingTrack("one", 2)

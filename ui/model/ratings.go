@@ -50,7 +50,12 @@ func (m *Model) rateSelectedTrack(rating int) tea.Cmd {
 	if m.ratingSync == nil {
 		m.ratingSync = &favorites.SyncQueue{}
 	}
-	run := m.ratingSync.Enqueue(track.Path, func() error {
+	songID := track.Meta(provider.MetaNavidromeID)
+	if songID == "" {
+		songID = track.Path
+	}
+	syncKey := name + "\x00" + songID
+	run := m.ratingSync.Enqueue(syncKey, func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), trackRatingTimeout)
 		defer cancel()
 		return rater.SetTrackRating(ctx, track, rating)

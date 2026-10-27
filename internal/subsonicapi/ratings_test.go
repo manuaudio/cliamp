@@ -88,6 +88,43 @@ func TestSetTrackRatingInvalidatesCachedPlaylistsContainingSong(t *testing.T) {
 	}
 }
 
+func TestSetTrackRatingPreventsInflightFetchFromRestoringStaleCache(t *testing.T) {
+	fetchStarted := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/getPlaylist":
+			close(fetchStarted)
+			<-releaseFetch
+			w.Write([]byte(`{"subsonic-response":{"status":"ok","playlist":{"entry":[]}}}`))
+		case "/rest/setRating":
+			w.Write([]byte(`{"subsonic-response":{"status":"ok"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewNavidromeClient(Config{BaseURL: srv.URL, User: "u", Password: "p"})
+	fetched := make(chan error, 1)
+	go func() {
+		_, err := c.Tracks("playlist-1")
+		fetched <- err
+	}()
+	<-fetchStarted
+	track := playlist.Track{ProviderMeta: map[string]string{provider.MetaNavidromeID: "song-1"}}
+	if err := c.SetTrackRating(context.Background(), track, 4); err != nil {
+		t.Fatalf("SetTrackRating: %v", err)
+	}
+	close(releaseFetch)
+	if err := <-fetched; err != nil {
+		t.Fatalf("Tracks: %v", err)
+	}
+	if _, ok := c.trackCache["playlist-1"]; ok {
+		t.Fatal("in-flight fetch restored a cache entry from before the rating update")
+	}
+}
+
 func TestSetTrackRatingRejectsInvalidInputWithoutRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
