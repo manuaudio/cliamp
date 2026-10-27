@@ -409,6 +409,8 @@ func (m *Model) handleMainKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 	if msg.String() == "*" && m.focus == focusPlaylist {
+		m.pendingSeekActive = false
+		m.pendingSeekExpiresAt = time.Time{}
 		m.pendingRatingActive = true
 		m.pendingRatingExpiresAt = time.Now().Add(time.Duration(statusTTLMedium))
 		m.status.Activityf(statusTTLMedium, "* then 0-5 -> rate selected track")

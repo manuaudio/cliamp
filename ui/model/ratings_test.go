@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -88,6 +89,75 @@ func TestRatingChordReturnsAsyncCommandWithoutBlockingSeekDigits(t *testing.T) {
 	}
 	if !plain.pendingSeekActive || plain.pendingSeekPct != 3 {
 		t.Fatalf("plain digit seek state = active %v pct %d", plain.pendingSeekActive, plain.pendingSeekPct)
+	}
+}
+
+func TestRatingChordClearsPendingSeek(t *testing.T) {
+	p := &ratingTestProvider{name: "Navidrome", accept: true}
+	m := ratingTestModel(p, ratingTrack("one", 1))
+
+	m.handleMainKey(tea.KeyPressMsg{Text: "3"})
+	if !m.pendingSeekActive {
+		t.Fatal("plain digit did not prime seek")
+	}
+	m.handleMainKey(tea.KeyPressMsg{Text: "*"})
+	if m.pendingSeekActive {
+		t.Fatal("rating chord left the prior seek pending")
+	}
+}
+
+type orderedRatingProvider struct {
+	startFirst   chan struct{}
+	releaseFirst chan struct{}
+	mu           sync.Mutex
+	ratings      []int
+}
+
+func (p *orderedRatingProvider) Name() string                                { return "Navidrome" }
+func (p *orderedRatingProvider) Playlists() ([]playlist.PlaylistInfo, error) { return nil, nil }
+func (p *orderedRatingProvider) Tracks(string) ([]playlist.Track, error)     { return nil, nil }
+func (p *orderedRatingProvider) CanRateTrack(playlist.Track) bool            { return true }
+func (p *orderedRatingProvider) SetTrackRating(_ context.Context, _ playlist.Track, rating int) error {
+	if rating == 3 {
+		close(p.startFirst)
+		<-p.releaseFirst
+	}
+	p.mu.Lock()
+	p.ratings = append(p.ratings, rating)
+	p.mu.Unlock()
+	return nil
+}
+
+func TestRatingWritesSerializeAndSkipSupersededQueuedValue(t *testing.T) {
+	p := &orderedRatingProvider{startFirst: make(chan struct{}), releaseFirst: make(chan struct{})}
+	track := ratingTrack("one", 1)
+	pl := playlist.New()
+	pl.Add(track)
+	m := Model{
+		playlist:  pl,
+		provider:  p,
+		providers: []provider.Entry{{Key: "navidrome", Name: p.Name(), Provider: p}},
+		focus:     focusPlaylist,
+	}
+
+	first := m.rateSelectedTrack(3)
+	done := make(chan tea.Msg, 3)
+	go func() { done <- first() }()
+	<-p.startFirst
+	second := m.rateSelectedTrack(4)
+	third := m.rateSelectedTrack(5)
+	go func() { done <- second() }()
+	go func() { done <- third() }()
+	close(p.releaseFirst)
+	for range 3 {
+		<-done
+	}
+
+	p.mu.Lock()
+	got := append([]int(nil), p.ratings...)
+	p.mu.Unlock()
+	if len(got) != 2 || got[0] != 3 || got[1] != 5 {
+		t.Fatalf("provider ratings = %v, want [3 5]", got)
 	}
 }
 

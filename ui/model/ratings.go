@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/bjarneo/cliamp/favorites"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 )
@@ -46,10 +47,19 @@ func (m *Model) rateSelectedTrack(rating int) tea.Cmd {
 	m.ratingRequest++
 	request := m.ratingRequest
 	cursor := m.plCursor
-	return func() tea.Msg {
+	if m.ratingSync == nil {
+		m.ratingSync = &favorites.SyncQueue{}
+	}
+	run := m.ratingSync.Enqueue(track.Path, func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), trackRatingTimeout)
 		defer cancel()
-		err := rater.SetTrackRating(ctx, track, rating)
+		return rater.SetTrackRating(ctx, track, rating)
+	})
+	return func() tea.Msg {
+		ran, err := run()
+		if !ran {
+			return nil
+		}
 		return trackRatingSyncedMsg{
 			provider: name,
 			track:    track,

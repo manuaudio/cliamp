@@ -2,6 +2,7 @@ package subsonicapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,6 +48,43 @@ func TestSetTrackRating(t *testing.T) {
 	}
 	if gotPath != "/rest/setRating" || gotID != "song-1" || gotRating != "4" {
 		t.Fatalf("request = %s?id=%s&rating=%s, want /rest/setRating?id=song-1&rating=4", gotPath, gotID, gotRating)
+	}
+}
+
+func TestSetTrackRatingInvalidatesCachedPlaylistsContainingSong(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  string
+		wantErr bool
+	}{
+		{name: "success", status: "ok"},
+		{name: "uncertain failure", status: "failed", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"subsonic-response":{"status":%q}}`, tc.status)
+			}))
+			defer srv.Close()
+
+			c := NewNavidromeClient(Config{BaseURL: srv.URL, User: "u", Password: "p"})
+			target := playlist.Track{Path: "target", ProviderMeta: map[string]string{provider.MetaNavidromeID: "song-1"}}
+			other := playlist.Track{Path: "other", ProviderMeta: map[string]string{provider.MetaNavidromeID: "song-2"}}
+			c.trackCache = map[string][]playlist.Track{
+				"contains-target": {target, other},
+				"unrelated":       {other},
+			}
+
+			err := c.SetTrackRating(context.Background(), target, 4)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("SetTrackRating error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if _, ok := c.trackCache["contains-target"]; ok {
+				t.Fatal("playlist containing rated song remained cached")
+			}
+			if _, ok := c.trackCache["unrelated"]; !ok {
+				t.Fatal("unrelated playlist was evicted")
+			}
+		})
 	}
 }
 

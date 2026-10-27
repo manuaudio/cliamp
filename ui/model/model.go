@@ -338,6 +338,7 @@ type Model struct {
 	pendingRatingActive    bool
 	pendingRatingExpiresAt time.Time
 	ratingRequest          uint64
+	ratingSync             *favorites.SyncQueue
 
 	// UI navigation
 	focus           focusArea
